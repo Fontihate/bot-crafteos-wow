@@ -48,20 +48,17 @@ def get_recipe_id(url: str) -> str:
     url = url.rstrip('/')
     last_part = url.split('/')[-1].lower()
     
-    # 1. Comprobamos si es un link de ITEM (Válido siempre)
     match = re.search(r'item=(\d+)', url)
     if match:
         return match.group(1)
         
-    # 2. Comprobamos si es un link de SPELL
     match = re.search(r'spell=(\d+)', url)
     if match:
-        # Si es un spell, comprobamos si en el nombre final pone "enchant" o "encantar"
         if 'enchant' in last_part or 'encantar' in last_part:
-            return match.group(1) # Es un encanto, válido
-        return "SPELL_NO_ENCHANT" # Es un spell, pero no de encantar. ¡Rechazado!
+            return match.group(1)
+        return "SPELL_NO_ENCHANT"
         
-    return None # No es un link de Wowhead válido
+    return None
 
 # ==========================================
 # CONFIGURACIÓN DEL BOT
@@ -198,15 +195,10 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
             f"{interaction.user.mention} necesita que alguien craftee este objeto:\n"
             f"🔗 {link}\n\n"
             f"**Crafteadores disponibles:** {mentions}\n"
-            f"*(Usa el hilo de abajo para poneros de acuerdo con los materiales)*"
+            f"*(Poneos de acuerdo por mensaje privado o en el canal)*"
         )
         
-        msg = await interaction.followup.send(message_content)
-        thread_name = f"Crafteo: {str(recipe_id)[:50]}"
-        
-        thread = await interaction.channel.create_thread(name=thread_name, message=msg, reason="Comisión de crafteo")
-        
-        await thread.send(f"Hola {mentions}. Por favor, pongáis de acuerdo con {interaction.user.mention} para gestionar la comisión. ¡Gracias!")
+        await interaction.followup.send(message_content)
         
         cooldowns[user_id] = now + COOLDOWN_TIME
     except Exception as e:
