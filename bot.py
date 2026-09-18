@@ -162,10 +162,10 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
         
         msg = await interaction.followup.send(message_content)
         thread_name = f"Crafteo: {recipe_id}"
-        thread = await msg.create_thread(name=thread_name)
+        # Solución: crear el hilo desde el canal, no desde el mensaje
+        thread = await interaction.channel.create_thread(name=thread_name, message=msg, reason="Comisión de crafteo")
         
-        await thread.send(f"Hola {mentions}. Por favor, pongáis de acuerdo con {interaction.user.mention} para gestionar la comisión. ¡Gracias!")
-        
+        await thread.send(f"Hola {mentions}. Por favor, poneros de acuerdo con {interaction.user.mention} para gestionar la comisión. ¡Gracias!")
         # Guardamos el cooldown
         cooldowns[user_id] = now + COOLDOWN_TIME
     except Exception as e:
