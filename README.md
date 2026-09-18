@@ -17,7 +17,6 @@ Permite a los jugadores registrar las recetas que conocen y realiza un ping auto
 * **Filtro Inteligente de Enlaces:**
   * Acepta enlaces de `item=` de forma universal (evita problemas de idioma).
   * Solo acepta enlaces de `spell=` si corresponden a encantamientos (validando que contengan `enchant` o `encantar` en la URL).
-* **Sistema Anti-Spam:** Cooldown de 30 minutos por usuario para prevenir el *flood* de peticiones.
 * **Filtro Inter-Servidor:** Si el bot está en varios servidores de Discord, solo mencionará a los crafteadores presentes en el servidor donde se realiza la solicitud.
 * **Base de Datos Persistente:** Integración con **Supabase (PostgreSQL)** para asegurar que los datos no se pierdan al reiniciar el bot.
 
