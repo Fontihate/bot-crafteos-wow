@@ -1,8 +1,12 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import re
 import os
+import time
 from supabase import create_client, Client
+from flask import Flask
+from threading import Thread
 
 # ==========================================
 # CONFIGURACIÓN DE ROLES DE PROFESIONES
@@ -34,7 +38,7 @@ if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     print("✅ Conexión a Supabase establecida.")
 else:
-    print("⚠️ ADVERTENCIA: Faltan las variables de entorno SUPABASE_URL o SUPABASE_KEY. El bot no podrá guardar datos.")
+    print("⚠️ ADVERTENCIA: Faltan las variables de entorno SUPABASE.")
 
 # ==========================================
 # FUNCIONES AUXILIARES
@@ -53,12 +57,16 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Control de spam (Cooldown manual)
+cooldowns = {}
+COOLDOWN_TIME = 1800 # 30 minutos en segundos
+
 @bot.event
 async def on_ready():
     print(f'✅ Bot conectado a Discord como {bot.user}!')
     try:
-        await bot.sync_commands()
-        print("Comandos slash sincronizados correctamente.")
+        synced = await bot.tree.sync()
+        print(f"Comandos slash sincronizados: {len(synced)}")
     except Exception as e:
         print(f"Error al sincronizar comandos: {e}")
 
@@ -66,116 +74,106 @@ async def on_ready():
 # COMANDOS DEL BOT
 # ==========================================
 
-@bot.slash_command(name="registrar_profesion", description="Registra tu profesión para obtener el rol del servidor.")
-async def registrar_profesion(
-    ctx: discord.ApplicationContext,
-    profesion: discord.Option(str, choices=list(ROLE_MAP.keys()))
-):
-    role_id = ROLE_MAP.get(profesion)
+@bot.tree.command(name="registrar_profesion", description="Registra tu profesión para obtener el rol del servidor.")
+@app_commands.choices(profesion=[app_commands.Choice(name=k, value=k) for k in ROLE_MAP.keys()])
+async def registrar_profesion(interaction: discord.Interaction, profesion: app_commands.Choice[str]):
+    role_id = ROLE_MAP.get(profesion.value)
     
     if role_id == 0:
-        await ctx.respond("Esa profesión aún no tiene un rol configurado en el servidor. Avisa a un admin.", ephemeral=True)
+        await interaction.response.send_message("Esa profesión aún no tiene un rol configurado. Avisa a un admin.", ephemeral=True)
         return
 
-    role = ctx.guild.get_role(role_id)
+    role = interaction.guild.get_role(role_id)
     if not role:
-        await ctx.respond("No encuentro el rol en el servidor. Revisa la configuración.", ephemeral=True)
+        await interaction.response.send_message("No encuentro el rol en el servidor.", ephemeral=True)
         return
 
     try:
-        await ctx.author.add_roles(role)
-        await ctx.respond(f"¡Te he asignado el rol de **{profesion}**! 🛠️", ephemeral=True)
+        await interaction.user.add_roles(role)
+        await interaction.response.send_message(f"¡Te he asignado el rol de **{profesion.value}**! 🛠️", ephemeral=True)
     except discord.Forbidden:
-        await ctx.respond("No tengo permisos para darte roles. Mi rol debe estar por encima del tuyo.", ephemeral=True)
+        await interaction.response.send_message("No tengo permisos para darte roles.", ephemeral=True)
 
 
-@bot.slash_command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link de Wowhead Forever.")
-async def añadir_crafteo(
-    ctx: discord.ApplicationContext,
-    link: str
-):
+@bot.tree.command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link de Wowhead Forever.")
+async def añadir_crafteo(interaction: discord.Interaction, link: str):
     recipe_id = parse_wowhead_link(link)
     
     if not recipe_id:
-        await ctx.respond("❌ Link inválido. Debe ser un link de Wowhead que contenga `spell=` o `item=`.\nEjemplo: `https://www.wowhead.com/forever/es/spell=16729/`", ephemeral=True)
+        await interaction.response.send_message("❌ Link inválido. Debe contener `spell=` o `item=`.", ephemeral=True)
         return
 
     try:
-        # 1. Comprobar si el usuario ya tiene esta receta registrada
-        response = supabase.table('crafters').select('*').eq('recipe_id', recipe_id).eq('user_id', ctx.author.id).execute()
+        response = supabase.table('crafters').select('*').eq('recipe_id', recipe_id).eq('user_id', interaction.user.id).execute()
         if len(response.data) > 0:
-            await ctx.respond("Ya tenías esta receta registrada. ✅", ephemeral=True)
+            await interaction.response.send_message("Ya tenías esta receta registrada. ✅", ephemeral=True)
             return
 
-        # 2. Insertar en la base de datos de Supabase
         supabase.table('crafters').insert({
             'recipe_id': recipe_id,
-            'user_id': ctx.author.id,
-            'user_name': ctx.author.name
+            'user_id': interaction.user.id,
+            'user_name': interaction.user.name
         }).execute()
         
-        await ctx.respond(f"¡Receta añadida a tu lista correctamente! (ID de receta: `{recipe_id}`)", ephemeral=True)
+        await interaction.response.send_message(f"¡Receta añadida a tu lista! (ID: `{recipe_id}`)", ephemeral=True)
     except Exception as e:
-        await ctx.respond(f"❌ Ocurrió un error al guardar en la base de datos: {e}", ephemeral=True)
+        await interaction.response.send_message(f"❌ Error al guardar: {e}", ephemeral=True)
 
 
-@bot.slash_command(name="pedir_crafteo", description="Pide un crafteo. El bot mencionará a todos los que tengan la receta.")
-@commands.cooldown(1, 1800, commands.BucketType.user) # 1 uso cada 1800 segundos (30 min)
-async def pedir_crafteo(
-    ctx: discord.ApplicationContext,
-    link: str
-):
-    await ctx.defer() 
+@bot.tree.command(name="pedir_crafteo", description="Pide un crafteo. El bot mencionará a todos los que tengan la receta.")
+async def pedir_crafteo(interaction: discord.Interaction, link: str):
+    user_id = interaction.user.id
+    now = time.time()
+    
+    # Comprobamos el cooldown
+    if user_id in cooldowns:
+        time_left = cooldowns[user_id] - now
+        if time_left > 0:
+            mins = int(time_left // 60)
+            secs = int(time_left % 60)
+            await interaction.response.send_message(f"⏳ Para evitar spam, debes esperar {mins} min y {secs} secs para volver a pedir un crafteo.", ephemeral=True)
+            return
+
+    await interaction.response.defer()
     
     recipe_id = parse_wowhead_link(link)
     if not recipe_id:
-        await ctx.respond("❌ Link inválido. Debe ser un link de Wowhead Forever.")
+        await interaction.followup.send("❌ Link inválido. Debe ser un link de Wowhead Forever.")
         return
 
     try:
-        # Buscar en Supabase quién tiene la receta
         response = supabase.table('crafters').select('user_id, user_name').eq('recipe_id', recipe_id).execute()
         rows = response.data
 
         if not rows:
-            await ctx.respond(f"Nadie en la guild tiene esta receta registrada todavía. 😔\n*(ID: {recipe_id})*")
+            await interaction.followup.send(f"Nadie en la guild tiene esta receta registrada. 😔\n*(ID: {recipe_id})*")
+            cooldowns[user_id] = now + COOLDOWN_TIME
             return
 
-        # Crear las menciones
         mentions = " ".join(f"<@{row['user_id']}>" for row in rows)
         
         message_content = (
             f"🔔 **¡Petición de Crafteo!** 🔔\n"
-            f"{ctx.author.mention} necesita que alguien craftee este objeto:\n"
+            f"{interaction.user.mention} necesita que alguien craftee este objeto:\n"
             f"🔗 {link}\n\n"
             f"**Crafteadores disponibles:** {mentions}\n"
             f"*(Usa el hilo de abajo para poneros de acuerdo con los materiales)*"
         )
         
-        msg = await ctx.send_followup(message_content)
+        msg = await interaction.followup.send(message_content)
         thread_name = f"Crafteo: {recipe_id}"
         thread = await msg.create_thread(name=thread_name)
         
-        await thread.send(f"Hola {mentions}. Por favor, pongáis de acuerdo con {ctx.author.mention} para gestionar la comisión. Cuando terminéis podéis archivar el hilo. ¡Gracias!")
+        await thread.send(f"Hola {mentions}. Por favor, pongáis de acuerdo con {interaction.user.mention} para gestionar la comisión. ¡Gracias!")
+        
+        # Guardamos el cooldown
+        cooldowns[user_id] = now + COOLDOWN_TIME
     except Exception as e:
-        await ctx.respond(f"❌ Ocurrió un error al buscar en la base de datos: {e}", ephemeral=True)
-
-
-@pedir_crafteo.error
-async def pedir_crafteo_error(ctx, error):
-    if isinstance(error, commands.CommandOnCooldown):
-        mins = int(error.retry_after // 60)
-        secs = int(error.retry_after % 60)
-        await ctx.respond(f"⏳ Para evitar spam, solo puedes pedir un crafteo cada 30 minutos. Prueba en {mins} minutos y {secs} segundos.", ephemeral=True)
-    else:
-        await ctx.respond(f"Ocurrió un error inesperado: {error}", ephemeral=True)
+        await interaction.followup.send(f"❌ Ocurrió un error al buscar: {e}", ephemeral=True)
 
 # ==========================================
 # SERVIDOR WEB FALSO PARA RENDER (FREE TIER)
 # ==========================================
-from flask import Flask
-from threading import Thread
-
 app = Flask('')
 @app.route('/')
 def home():
