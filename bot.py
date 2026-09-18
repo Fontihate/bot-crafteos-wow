@@ -43,11 +43,25 @@ else:
 # ==========================================
 # FUNCIONES AUXILIARES
 # ==========================================
-def parse_wowhead_link(url: str) -> str:
-    match = re.search(r'(?:spell|item)=(\d+)', url)
+def get_recipe_id(url: str) -> str:
+    """Filtra el link: Acepta ITEM siempre. Acepta SPELL solo si es un encanto."""
+    url = url.rstrip('/')
+    last_part = url.split('/')[-1].lower()
+    
+    # 1. Comprobamos si es un link de ITEM (Válido siempre)
+    match = re.search(r'item=(\d+)', url)
     if match:
         return match.group(1)
-    return None
+        
+    # 2. Comprobamos si es un link de SPELL
+    match = re.search(r'spell=(\d+)', url)
+    if match:
+        # Si es un spell, comprobamos si en el nombre final pone "enchant" o "encantar"
+        if 'enchant' in last_part or 'encantar' in last_part:
+            return match.group(1) # Es un encanto, válido
+        return "SPELL_NO_ENCHANT" # Es un spell, pero no de encantar. ¡Rechazado!
+        
+    return None # No es un link de Wowhead válido
 
 # ==========================================
 # CONFIGURACIÓN DEL BOT
@@ -92,15 +106,18 @@ async def registrar_profesion(interaction: discord.Interaction, profesion: app_c
         await interaction.user.add_roles(role)
         await interaction.response.send_message(f"¡Te he asignado el rol de **{profesion.value}**! 🛠️", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message("No tengo permisos para darte roles.", ephemeral=True)
+        await interaction.response.send_message("No tengo permisos para darte roles. Sube mi rol por encima del tuyo.", ephemeral=True)
 
 
-@bot.tree.command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link de Wowhead Forever.")
+@bot.tree.command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link del objeto (item=) de Wowhead Forever.")
 async def añadir_crafteo(interaction: discord.Interaction, link: str):
-    recipe_id = parse_wowhead_link(link)
+    recipe_id = get_recipe_id(link)
     
-    if not recipe_id:
-        await interaction.response.send_message("❌ Link inválido. Debe contener `spell=` o `item=`.", ephemeral=True)
+    if recipe_id == "SPELL_NO_ENCHANT":
+        await interaction.response.send_message("❌ Has puesto un link de `spell=`. Para recetas normales, busca en Wowhead el **objeto físico** y usa su link (el que lleva `item=`).", ephemeral=True)
+        return
+    elif not recipe_id:
+        await interaction.response.send_message("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever que contenga `item=`.", ephemeral=True)
         return
 
     try:
@@ -120,12 +137,33 @@ async def añadir_crafteo(interaction: discord.Interaction, link: str):
         await interaction.response.send_message(f"❌ Error al guardar: {e}", ephemeral=True)
 
 
+@bot.tree.command(name="eliminar_crafteo", description="Elimina una receta de tu lista si te equivocaste al ponerla.")
+async def eliminar_crafteo(interaction: discord.Interaction, link: str):
+    recipe_id = get_recipe_id(link)
+    
+    if recipe_id == "SPELL_NO_ENCHANT":
+        await interaction.response.send_message("❌ Has puesto un link de `spell=`. Para recetas normales usa el link del objeto (`item=`).", ephemeral=True)
+        return
+    elif not recipe_id:
+        await interaction.response.send_message("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever que contenga `item=`.", ephemeral=True)
+        return
+
+    try:
+        response = supabase.table('crafters').delete().eq('recipe_id', recipe_id).eq('user_id', interaction.user.id).execute()
+        
+        if len(response.data) > 0:
+            await interaction.response.send_message(f"🗑️ Receta eliminada de tu lista correctamente. (ID: `{recipe_id}`)", ephemeral=True)
+        else:
+            await interaction.response.send_message("⚠️ No tenías esa receta registrada a tu nombre, así que no he borrado nada.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error al borrar: {e}", ephemeral=True)
+
+
 @bot.tree.command(name="pedir_crafteo", description="Pide un crafteo. El bot mencionará a todos los que tengan la receta.")
 async def pedir_crafteo(interaction: discord.Interaction, link: str):
     user_id = interaction.user.id
     now = time.time()
     
-    # Comprobamos el cooldown
     if user_id in cooldowns:
         time_left = cooldowns[user_id] - now
         if time_left > 0:
@@ -136,9 +174,12 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
 
     await interaction.response.defer()
     
-    recipe_id = parse_wowhead_link(link)
-    if not recipe_id:
-        await interaction.followup.send("❌ Link inválido. Debe ser un link de Wowhead Forever.")
+    recipe_id = get_recipe_id(link)
+    if recipe_id == "SPELL_NO_ENCHANT":
+        await interaction.followup.send("❌ Has puesto un link de `spell=`. Para pedir recetas normales, usa el link del objeto (`item=`).", ephemeral=True)
+        return
+    elif not recipe_id:
+        await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever que contenga `item=`.", ephemeral=True)
         return
 
     try:
@@ -146,7 +187,7 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
         rows = response.data
 
         if not rows:
-            await interaction.followup.send(f"Nadie en la guild tiene esta receta registrada. 😔\n*(ID: {recipe_id})*")
+            await interaction.followup.send(f"Nadie en la guild tiene esta receta registrada todavía. 😔\n*(ID: {recipe_id})*")
             cooldowns[user_id] = now + COOLDOWN_TIME
             return
 
@@ -161,12 +202,12 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
         )
         
         msg = await interaction.followup.send(message_content)
-        thread_name = f"Crafteo: {recipe_id}"
-        # Solución: crear el hilo desde el canal, no desde el mensaje
+        thread_name = f"Crafteo: {str(recipe_id)[:50]}"
+        
         thread = await interaction.channel.create_thread(name=thread_name, message=msg, reason="Comisión de crafteo")
         
-        await thread.send(f"Hola {mentions}. Por favor, poneros de acuerdo con {interaction.user.mention} para gestionar la comisión. ¡Gracias!")
-        # Guardamos el cooldown
+        await thread.send(f"Hola {mentions}. Por favor, pongáis de acuerdo con {interaction.user.mention} para gestionar la comisión. ¡Gracias!")
+        
         cooldowns[user_id] = now + COOLDOWN_TIME
     except Exception as e:
         await interaction.followup.send(f"❌ Ocurrió un error al buscar: {e}", ephemeral=True)
