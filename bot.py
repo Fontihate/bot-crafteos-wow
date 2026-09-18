@@ -1,8 +1,8 @@
 import discord
 from discord.ext import commands
-import sqlite3
 import re
 import os
+from supabase import create_client, Client
 
 # ==========================================
 # CONFIGURACIÓN DE ROLES DE PROFESIONES
@@ -24,27 +24,22 @@ ROLE_MAP = {
 }
 
 # ==========================================
-# SISTEMA DE BASE DE DATOS (SQLite)
+# CONEXIÓN A LA BASE DE DATOS (SUPABASE)
 # ==========================================
-def init_db():
-    conn = sqlite3.connect('crafts.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS crafters (
-                    recipe_id TEXT,
-                    user_id INTEGER,
-                    user_name TEXT
-                )''')
-    conn.commit()
-    conn.close()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Inicializar la BD al arrancar
-init_db()
+supabase: Client = None
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    print("✅ Conexión a Supabase establecida.")
+else:
+    print("⚠️ ADVERTENCIA: Faltan las variables de entorno SUPABASE_URL o SUPABASE_KEY. El bot no podrá guardar datos.")
 
 # ==========================================
 # FUNCIONES AUXILIARES
 # ==========================================
 def parse_wowhead_link(url: str) -> str:
-    """Extrae el ID de la receta/objeto del link de Wowhead Forever."""
     match = re.search(r'(?:spell|item)=(\d+)', url)
     if match:
         return match.group(1)
@@ -53,28 +48,22 @@ def parse_wowhead_link(url: str) -> str:
 # ==========================================
 # CONFIGURACIÓN DEL BOT
 # ==========================================
-# Configurar los Intents (necesarios para leer miembros y asignar roles)
 intents = discord.Intents.default()
 intents.members = True
 
-# Inicializar el bot
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ==========================================
-# EVENTOS DEL BOT
-# ==========================================
 @bot.event
 async def on_ready():
-    print(f'✅ Bot conectado correctamente como {bot.user}!')
+    print(f'✅ Bot conectado a Discord como {bot.user}!')
     try:
-        # Sincroniza los comandos slash al arrancar
         await bot.sync_commands()
         print("Comandos slash sincronizados correctamente.")
     except Exception as e:
         print(f"Error al sincronizar comandos: {e}")
 
 # ==========================================
-# COMANDOS DEL BOT (SLASH COMMANDS)
+# COMANDOS DEL BOT
 # ==========================================
 
 @bot.slash_command(name="registrar_profesion", description="Registra tu profesión para obtener el rol del servidor.")
@@ -111,23 +100,23 @@ async def añadir_crafteo(
         await ctx.respond("❌ Link inválido. Debe ser un link de Wowhead que contenga `spell=` o `item=`.\nEjemplo: `https://www.wowhead.com/forever/es/spell=16729/`", ephemeral=True)
         return
 
-    conn = sqlite3.connect('crafts.db')
-    c = conn.cursor()
-    
-    # Comprobar si ya lo tenía añadido
-    c.execute("SELECT * FROM crafters WHERE recipe_id=? AND user_id=?", (recipe_id, ctx.author.id))
-    if c.fetchone():
-        await ctx.respond("Ya tenías esta receta registrada. ✅", ephemeral=True)
-        conn.close()
-        return
+    try:
+        # 1. Comprobar si el usuario ya tiene esta receta registrada
+        response = supabase.table('crafters').select('*').eq('recipe_id', recipe_id).eq('user_id', ctx.author.id).execute()
+        if len(response.data) > 0:
+            await ctx.respond("Ya tenías esta receta registrada. ✅", ephemeral=True)
+            return
 
-    # Insertar en la BD
-    c.execute("INSERT INTO crafters (recipe_id, user_id, user_name) VALUES (?, ?, ?)", 
-              (recipe_id, ctx.author.id, ctx.author.name))
-    conn.commit()
-    conn.close()
-    
-    await ctx.respond(f"¡Receta añadida a tu lista correctamente! (ID de receta: `{recipe_id}`)", ephemeral=True)
+        # 2. Insertar en la base de datos de Supabase
+        supabase.table('crafters').insert({
+            'recipe_id': recipe_id,
+            'user_id': ctx.author.id,
+            'user_name': ctx.author.name
+        }).execute()
+        
+        await ctx.respond(f"¡Receta añadida a tu lista correctamente! (ID de receta: `{recipe_id}`)", ephemeral=True)
+    except Exception as e:
+        await ctx.respond(f"❌ Ocurrió un error al guardar en la base de datos: {e}", ephemeral=True)
 
 
 @bot.slash_command(name="pedir_crafteo", description="Pide un crafteo. El bot mencionará a todos los que tengan la receta.")
@@ -136,7 +125,6 @@ async def pedir_crafteo(
     ctx: discord.ApplicationContext,
     link: str
 ):
-    # Esperamos un poco porque la BD tarda en responder
     await ctx.defer() 
     
     recipe_id = parse_wowhead_link(link)
@@ -144,40 +132,37 @@ async def pedir_crafteo(
         await ctx.respond("❌ Link inválido. Debe ser un link de Wowhead Forever.")
         return
 
-    conn = sqlite3.connect('crafts.db')
-    c = conn.cursor()
-    c.execute("SELECT user_id, user_name FROM crafters WHERE recipe_id=?", (recipe_id,))
-    rows = c.fetchall()
-    conn.close()
+    try:
+        # Buscar en Supabase quién tiene la receta
+        response = supabase.table('crafters').select('user_id, user_name').eq('recipe_id', recipe_id).execute()
+        rows = response.data
 
-    if not rows:
-        await ctx.respond(f"Nadie en la guild tiene esta receta registrada todavía. 😔\n*(ID: {recipe_id})*")
-        return
+        if not rows:
+            await ctx.respond(f"Nadie en la guild tiene esta receta registrada todavía. 😔\n*(ID: {recipe_id})*")
+            return
 
-    # Crear las menciones
-    mentions = " ".join(f"<@{row[0]}>" for row in rows)
-    
-    # Mensaje principal
-    message_content = (
-        f"🔔 **¡Petición de Crafteo!** 🔔\n"
-        f"{ctx.author.mention} necesita que alguien craftee este objeto:\n"
-        f"🔗 {link}\n\n"
-        f"**Crafteadores disponibles:** {mentions}\n"
-        f"*(Usa el hilo de abajo para poneros de acuerdo con los materiales)*"
-    )
-    
-    # Enviar el mensaje y crear el hilo
-    msg = await ctx.send_followup(message_content)
-    thread_name = f"Crafteo: {recipe_id}"
-    thread = await msg.create_thread(name=thread_name)
-    
-    # Mensaje automático dentro del hilo
-    await thread.send(f"Hola {mentions}. Por favor, pongáis de acuerdo con {ctx.author.mention} para gestionar la comisión. Cuando terminéis podéis archivar el hilo. ¡Gracias!")
+        # Crear las menciones
+        mentions = " ".join(f"<@{row['user_id']}>" for row in rows)
+        
+        message_content = (
+            f"🔔 **¡Petición de Crafteo!** 🔔\n"
+            f"{ctx.author.mention} necesita que alguien craftee este objeto:\n"
+            f"🔗 {link}\n\n"
+            f"**Crafteadores disponibles:** {mentions}\n"
+            f"*(Usa el hilo de abajo para poneros de acuerdo con los materiales)*"
+        )
+        
+        msg = await ctx.send_followup(message_content)
+        thread_name = f"Crafteo: {recipe_id}"
+        thread = await msg.create_thread(name=thread_name)
+        
+        await thread.send(f"Hola {mentions}. Por favor, pongáis de acuerdo con {ctx.author.mention} para gestionar la comisión. Cuando terminéis podéis archivar el hilo. ¡Gracias!")
+    except Exception as e:
+        await ctx.respond(f"❌ Ocurrió un error al buscar en la base de datos: {e}", ephemeral=True)
 
 
 @pedir_crafteo.error
 async def pedir_crafteo_error(ctx, error):
-    # Manejo del cooldown (antispam)
     if isinstance(error, commands.CommandOnCooldown):
         mins = int(error.retry_after // 60)
         secs = int(error.retry_after % 60)
@@ -185,16 +170,13 @@ async def pedir_crafteo_error(ctx, error):
     else:
         await ctx.respond(f"Ocurrió un error inesperado: {error}", ephemeral=True)
 
-
 # ==========================================
 # SERVIDOR WEB FALSO PARA RENDER (FREE TIER)
 # ==========================================
 from flask import Flask
 from threading import Thread
 
-# Creamos una web falsa para que Render no nos apague por inactividad
 app = Flask('')
-
 @app.route('/')
 def home():
     return "Bot de WoW funcionando correctamente."
@@ -207,16 +189,13 @@ def keep_alive():
     t = Thread(target=run_web)
     t.start()
 
-
 # ==========================================
 # INICIAR EL BOT
 # ==========================================
-# Render inyectará el token en una variable de entorno
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 if TOKEN is None:
     print("ERROR CRÍTICO: No se ha encontrado el token de Discord.")
-    print("Asegúrate de configurar la variable de entorno 'DISCORD_TOKEN' en Render.")
 else:
-    keep_alive() # Levantamos la web
-    bot.run(TOKEN) # Encendemos el bot
+    keep_alive()
+    bot.run(TOKEN)
