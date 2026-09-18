@@ -45,7 +45,7 @@ def get_recipe_id(url: str) -> str:
 # CONFIGURACIÓN DEL BOT
 # ==========================================
 intents = discord.Intents.default()
-intents.members = True
+intents.members = True # VITAL para poder comprobar si alguien está en un servidor
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -89,7 +89,7 @@ async def añadir_crafteo(interaction: discord.Interaction, link: str):
             'user_name': interaction.user.name
         }).execute()
         
-        await interaction.response.send_message(f"¡Receta añadida a tu lista! (ID: `{recipe_id}`)", ephemeral=True)
+        await interaction.response.send_message(f"¡Receta añadida a tu lista global! (ID: `{recipe_id}`)", ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ Error al guardar: {e}", ephemeral=True)
 
@@ -116,7 +116,7 @@ async def eliminar_crafteo(interaction: discord.Interaction, link: str):
         await interaction.response.send_message(f"❌ Error al borrar: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="pedir_crafteo", description="Pide un crafteo. El bot mencionará a todos los que tengan la receta.")
+@bot.tree.command(name="pedir_crafteo", description="Pide un crafteo. El bot mencionará a quienes sepan hacerlo y estén en este Discord.")
 async def pedir_crafteo(interaction: discord.Interaction, link: str):
     user_id = interaction.user.id
     now = time.time()
@@ -140,21 +140,34 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
         return
 
     try:
+        # Sacamos a todos los que tienen la receta en la BD global
         response = supabase.table('crafters').select('user_id, user_name').eq('recipe_id', recipe_id).execute()
         rows = response.data
 
         if not rows:
-            await interaction.followup.send(f"Nadie en la guild tiene esta receta registrada todavía. 😔\n*(ID: {recipe_id})*")
+            await interaction.followup.send(f"Nadie sabe craftear esto todavía. 😔\n*(ID: {recipe_id})*")
             cooldowns[user_id] = now + COOLDOWN_TIME
             return
 
-        mentions = " ".join(f"<@{row['user_id']}>" for row in rows)
+        # FILTRO INTER-SERVIDOR: Comprobamos quiénes de la lista están en ESTE Discord
+        mentions = []
+        for row in rows:
+            # interaction.guild.get_member devuelve None si el usuario no está en este servidor
+            if interaction.guild.get_member(row['user_id']):
+                mentions.append(f"<@{row['user_id']}>")
+
+        if not mentions:
+            await interaction.followup.send("Hay gente que sabe craftear esto, pero ninguno está en este servidor de Discord. 😔")
+            cooldowns[user_id] = now + COOLDOWN_TIME
+            return
+
+        mentions_str = " ".join(mentions)
         
         message_content = (
             f"🔔 **¡Petición de Crafteo!** 🔔\n"
             f"{interaction.user.mention} necesita que alguien craftee este objeto:\n"
             f"🔗 {link}\n\n"
-            f"**Crafteadores disponibles:** {mentions}\n"
+            f"**Crafteadores disponibles aquí:** {mentions_str}\n"
             f"*(Poneos de acuerdo por mensaje privado o en el canal)*"
         )
         
