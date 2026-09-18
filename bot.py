@@ -9,25 +9,6 @@ from flask import Flask
 from threading import Thread
 
 # ==========================================
-# CONFIGURACIÓN DE ROLES DE PROFESIONES
-# ==========================================
-# Pon aquí el nombre exacto del rol y la ID del rol entre comillas.
-# Ejemplo: "Alquimia": 123456789012345678
-# Deja la ID como "0" si aún no has creado el rol, y el bot no dará error.
-ROLE_MAP = {
-    "Herboristería": 1550430033703870544,
-    "Minería": 1550429708305571891,
-    "Desuello": 1550429747232641024,
-    "Sastrería": 1550429610909368411,
-    "Herrería": 1550429250216001536,
-    "Alquimia": 1550429445373038592,
-    "Ingeniería": 1550429481959694347,
-    "Peletería": 1550429534581563402,
-    "Encantamiento": 1550429647429304410,
-    "Cocina": 1550429683483680829
-}
-
-# ==========================================
 # CONEXIÓN A LA BASE DE DATOS (SUPABASE)
 # ==========================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -84,27 +65,6 @@ async def on_ready():
 # ==========================================
 # COMANDOS DEL BOT
 # ==========================================
-
-@bot.tree.command(name="registrar_profesion", description="Registra tu profesión para obtener el rol del servidor.")
-@app_commands.choices(profesion=[app_commands.Choice(name=k, value=k) for k in ROLE_MAP.keys()])
-async def registrar_profesion(interaction: discord.Interaction, profesion: app_commands.Choice[str]):
-    role_id = ROLE_MAP.get(profesion.value)
-    
-    if role_id == 0:
-        await interaction.response.send_message("Esa profesión aún no tiene un rol configurado. Avisa a un admin.", ephemeral=True)
-        return
-
-    role = interaction.guild.get_role(role_id)
-    if not role:
-        await interaction.response.send_message("No encuentro el rol en el servidor.", ephemeral=True)
-        return
-
-    try:
-        await interaction.user.add_roles(role)
-        await interaction.response.send_message(f"¡Te he asignado el rol de **{profesion.value}**! 🛠️", ephemeral=True)
-    except discord.Forbidden:
-        await interaction.response.send_message("No tengo permisos para darte roles. Sube mi rol por encima del tuyo.", ephemeral=True)
-
 
 @bot.tree.command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link del objeto (item=) de Wowhead Forever.")
 async def añadir_crafteo(interaction: discord.Interaction, link: str):
