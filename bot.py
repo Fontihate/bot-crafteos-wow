@@ -4,6 +4,7 @@ from discord import app_commands
 import re
 import os
 import time
+import requests
 from supabase import create_client, Client
 from flask import Flask
 from threading import Thread
@@ -22,30 +23,53 @@ else:
     print("⚠️ ADVERTENCIA: Faltan las variables de entorno SUPABASE.")
 
 # ==========================================
-# FUNCIONES AUXILIARES
+# FUNCIONES AUXILIARES (SCRAPEO WOWHEAD)
 # ==========================================
 def get_recipe_id(url: str) -> str:
-    """Filtra el link: Acepta ITEM siempre. Acepta SPELL solo si es un encanto."""
-    url = url.rstrip('/')
-    last_part = url.split('/')[-1].lower()
+    """Normaliza el link a inglés, scrapea Wowhead y devuelve el ID universal."""
+    # 1. Extraer tipo (spell/item) y ID ignorando el idioma
+    match = re.search(r'wowhead\.com/forever(?:/\w+)?/(spell|item)=(\d+)', url)
+    if not match:
+        return None
     
-    match = re.search(r'item=(\d+)', url)
-    if match:
-        return match.group(1)
+    url_type = match.group(1)
+    url_id = match.group(2)
+    
+    # 2. Construir URL limpia en inglés (sin traducciones ni coletillas)
+    clean_url = f"https://www.wowhead.com/forever/{url_type}={url_id}"
+    
+    # 3. Scrapear Wowhead (con un timeout de 5s para no tascar el bot)
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        response = requests.get(clean_url, headers=headers, timeout=5)
+        html = response.text
         
-    match = re.search(r'spell=(\d+)', url)
-    if match:
-        if 'enchant' in last_part or 'encantar' in last_part:
-            return match.group(1)
-        return "SPELL_NO_ENCHANT"
-        
-    return None
+        # 4. Lógica de relación
+        if url_type == 'spell':
+            # Buscamos si crea un item. Wowhead tiene el ID del item metido por ahí en el HTML.
+            item_match = re.search(r'item=(\d+)', html)
+            if item_match:
+                return item_match.group(1) # ¡Encontramos el item! Devolvemos su ID universal
+            
+            # Si no crea un item, comprobamos si es un encanto (Effect: Enchant Item)
+            if 'Enchant' in html or 'enchant' in html:
+                return url_id # Devolvemos el ID del spell porque es un encanto
+                
+            return "SPELL_NO_ENCHANT" # Es un spell que no es encanto ni crea item
+        else:
+            # Si el usuario ya metió un link de item, devolvemos ese ID directamente
+            return url_id
+            
+    except Exception as e:
+        print(f"Error scrapeando Wowhead: {e}")
+        # Si Wowhead está caído o bloquea el bot, hacemos fallback al ID que nos dio el usuario
+        return url_id
 
 # ==========================================
 # CONFIGURACIÓN DEL BOT
 # ==========================================
 intents = discord.Intents.default()
-intents.members = True # VITAL para poder comprobar si alguien está en un servidor
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -66,21 +90,24 @@ async def on_ready():
 # COMANDOS DEL BOT
 # ==========================================
 
-@bot.tree.command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link del objeto (item=) de Wowhead Forever.")
+@bot.tree.command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link de Wowhead Forever.")
 async def añadir_crafteo(interaction: discord.Interaction, link: str):
+    # Avisamos de que va a tardar un poquito porque lee Wowhead
+    await interaction.response.defer(ephemeral=True)
+    
     recipe_id = get_recipe_id(link)
     
     if recipe_id == "SPELL_NO_ENCHANT":
-        await interaction.response.send_message("❌ Has puesto un link de `spell=`. Para recetas normales, busca en Wowhead el **objeto físico** y usa su link (el que lleva `item=`).", ephemeral=True)
+        await interaction.followup.send("❌ Has puesto un link de `spell=` de algo que no es un encanto. Para recetas normales busca el **objeto físico** en Wowhead y usa su link.", ephemeral=True)
         return
     elif not recipe_id:
-        await interaction.response.send_message("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever que contenga `item=`.", ephemeral=True)
+        await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever.", ephemeral=True)
         return
 
     try:
         response = supabase.table('crafters').select('*').eq('recipe_id', recipe_id).eq('user_id', interaction.user.id).execute()
         if len(response.data) > 0:
-            await interaction.response.send_message("Ya tenías esta receta registrada. ✅", ephemeral=True)
+            await interaction.followup.send("Ya tenías esta receta registrada. ✅", ephemeral=True)
             return
 
         supabase.table('crafters').insert({
@@ -89,31 +116,30 @@ async def añadir_crafteo(interaction: discord.Interaction, link: str):
             'user_name': interaction.user.name
         }).execute()
         
-        await interaction.response.send_message(f"¡Receta añadida a tu lista global! (ID: `{recipe_id}`)", ephemeral=True)
+        await interaction.followup.send(f"¡Receta añadida a tu lista! (ID guardado: `{recipe_id}`)", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"❌ Error al guardar: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Error al guardar: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="eliminar_crafteo", description="Elimina una receta de tu lista si te equivocaste al ponerla.")
 async def eliminar_crafteo(interaction: discord.Interaction, link: str):
+    await interaction.response.defer(ephemeral=True)
+    
     recipe_id = get_recipe_id(link)
     
-    if recipe_id == "SPELL_NO_ENCHANT":
-        await interaction.response.send_message("❌ Has puesto un link de `spell=`. Para recetas normales usa el link del objeto (`item=`).", ephemeral=True)
-        return
-    elif not recipe_id:
-        await interaction.response.send_message("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever que contenga `item=`.", ephemeral=True)
+    if not recipe_id:
+        await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever.", ephemeral=True)
         return
 
     try:
         response = supabase.table('crafters').delete().eq('recipe_id', recipe_id).eq('user_id', interaction.user.id).execute()
         
         if len(response.data) > 0:
-            await interaction.response.send_message(f"🗑️ Receta eliminada de tu lista correctamente. (ID: `{recipe_id}`)", ephemeral=True)
+            await interaction.followup.send(f"🗑️ Receta eliminada de tu lista correctamente.", ephemeral=True)
         else:
-            await interaction.response.send_message("⚠️ No tenías esa receta registrada a tu nombre, así que no he borrado nada.", ephemeral=True)
+            await interaction.followup.send("⚠️ No tenías esa receta registrada a tu nombre, así que no he borrado nada.", ephemeral=True)
     except Exception as e:
-        await interaction.response.send_message(f"❌ Error al borrar: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ Error al borrar: {e}", ephemeral=True)
 
 
 @bot.tree.command(name="pedir_crafteo", description="Pide un crafteo. El bot mencionará a quienes sepan hacerlo y estén en este Discord.")
@@ -132,11 +158,8 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
     await interaction.response.defer()
     
     recipe_id = get_recipe_id(link)
-    if recipe_id == "SPELL_NO_ENCHANT":
-        await interaction.followup.send("❌ Has puesto un link de `spell=`. Para pedir recetas normales, usa el link del objeto (`item=`).", ephemeral=True)
-        return
-    elif not recipe_id:
-        await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever que contenga `item=`.", ephemeral=True)
+    if not recipe_id:
+        await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever.", ephemeral=True)
         return
 
     try:
@@ -152,7 +175,6 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
         # FILTRO INTER-SERVIDOR: Comprobamos quiénes de la lista están en ESTE Discord
         mentions = []
         for row in rows:
-            # interaction.guild.get_member devuelve None si el usuario no está en este servidor
             if interaction.guild.get_member(row['user_id']):
                 mentions.append(f"<@{row['user_id']}>")
 
