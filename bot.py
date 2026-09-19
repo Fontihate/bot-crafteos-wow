@@ -25,45 +25,63 @@ else:
 # ==========================================
 # FUNCIONES AUXILIARES (SCRAPEO WOWHEAD)
 # ==========================================
-def get_recipe_id(url: str) -> str:
-    """Normaliza el link a inglés, scrapea Wowhead y devuelve el ID universal."""
-    # 1. Extraer tipo (spell/item) y ID ignorando el idioma
+def get_recipe_ids(url: str) -> tuple:
+    """
+    Scrapea Wowhead y devuelve una tupla: (spell_id, item_id).
+    Si no puede determinar uno, devuelve None en su lugar.
+    """
+    # 1. Limpiar y extraer tipo/ID ignorando el idioma
     match = re.search(r'wowhead\.com/forever(?:/\w+)?/(spell|item)=(\d+)', url)
     if not match:
-        return None
+        return None, None
     
     url_type = match.group(1)
     url_id = match.group(2)
     
-    # 2. Construir URL limpia en inglés (sin traducciones ni coletillas)
-    clean_url = f"https://www.wowhead.com/forever/{url_type}={url_id}"
+    # 2. Usar la API JSON de Wowhead (mucho más fiable que leer HTML)
+    api_url = f"https://www.wowhead.com/forever/{url_type}={url_id}&json"
     
-    # 3. Scrapear Wowhead (con un timeout de 5s para no tascar el bot)
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(clean_url, headers=headers, timeout=5)
-        html = response.text
+        response = requests.get(api_url, headers=headers, timeout=5)
+        data = response.json()
         
-        # 4. Lógica de relación
-        if url_type == 'spell':
-            # Buscamos si crea un item. Wowhead tiene el ID del item metido por ahí en el HTML.
-            item_match = re.search(r'item=(\d+)', html)
-            if item_match:
-                return item_match.group(1) # ¡Encontramos el item! Devolvemos su ID universal
+        spell_id = None
+        item_id = None
+        
+        # La API devuelve una lista de diccionarios
+        if data and isinstance(data, list) and len(data) > 0:
+            tooltip = data[0].get('tooltip', '')
             
-            # Si no crea un item, comprobamos si es un encanto (Effect: Enchant Item)
-            if 'Enchant' in html or 'enchant' in html:
-                return url_id # Devolvemos el ID del spell porque es un encanto
-                
-            return "SPELL_NO_ENCHANT" # Es un spell que no es encanto ni crea item
-        else:
-            # Si el usuario ya metió un link de item, devolvemos ese ID directamente
-            return url_id
-            
+            if url_type == 'spell':
+                spell_id = url_id
+                # Buscamos si el tooltip menciona que crea un item
+                item_match = re.search(r'item=(\d+)', tooltip)
+                if item_match:
+                    item_id = item_match.group(1)
+                elif 'Enchant' in tooltip or 'enchant' in tooltip.lower():
+                    # Es un encanto, no hay item
+                    pass
+                else:
+                    # Es un spell que no es encanto ni crea item
+                    return "SPELL_NO_ENCHANT", None
+                    
+            elif url_type == 'item':
+                item_id = url_id
+                # Buscamos si el tooltip dice "Created by" y tiene el spell
+                spell_match = re.search(r'spell=(\d+)', tooltip)
+                if spell_match:
+                    spell_id = spell_match.group(1)
+                    
+        return spell_id, item_id
+        
     except Exception as e:
-        print(f"Error scrapeando Wowhead: {e}")
-        # Si Wowhead está caído o bloquea el bot, hacemos fallback al ID que nos dio el usuario
-        return url_id
+        print(f"Error en API Wowhead: {e}")
+        # Fallback: si la API falla, devolvemos el ID que nos dieron
+        if url_type == 'spell':
+            return url_id, None
+        else:
+            return None, url_id
 
 # ==========================================
 # CONFIGURACIÓN DEL BOT
@@ -92,17 +110,19 @@ async def on_ready():
 
 @bot.tree.command(name="añadir_crafteo", description="Añade una receta que sepas craftear usando el link de Wowhead Forever.")
 async def añadir_crafteo(interaction: discord.Interaction, link: str):
-    # Avisamos de que va a tardar un poquito porque lee Wowhead
     await interaction.response.defer(ephemeral=True)
     
-    recipe_id = get_recipe_id(link)
+    spell_id, item_id = get_recipe_ids(link)
     
-    if recipe_id == "SPELL_NO_ENCHANT":
+    if spell_id == "SPELL_NO_ENCHANT":
         await interaction.followup.send("❌ Has puesto un link de `spell=` de algo que no es un encanto. Para recetas normales busca el **objeto físico** en Wowhead y usa su link.", ephemeral=True)
         return
-    elif not recipe_id:
+    if not spell_id and not item_id:
         await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever.", ephemeral=True)
         return
+
+    # El ID universal para la BD siempre será el ITEM si existe. Si no, el SPELL.
+    recipe_id = item_id if item_id else spell_id
 
     try:
         response = supabase.table('crafters').select('*').eq('recipe_id', recipe_id).eq('user_id', interaction.user.id).execute()
@@ -116,7 +136,16 @@ async def añadir_crafteo(interaction: discord.Interaction, link: str):
             'user_name': interaction.user.name
         }).execute()
         
-        await interaction.followup.send(f"¡Receta añadida a tu lista! (ID guardado: `{recipe_id}`)", ephemeral=True)
+        # Mensaje personalizado mostrando ambos IDs
+        msg = "¡Receta añadida a tu lista global! ✅\n"
+        if spell_id and item_id:
+            msg += f"Spell ID: `{spell_id}` | Item ID: `{item_id}`"
+        elif spell_id and not item_id:
+            msg += f"Spell ID (Encanto): `{spell_id}`"
+        elif item_id and not spell_id:
+            msg += f"Item ID: `{item_id}` (No se encontró el Spell de origen)"
+            
+        await interaction.followup.send(msg, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ Error al guardar: {e}", ephemeral=True)
 
@@ -125,11 +154,16 @@ async def añadir_crafteo(interaction: discord.Interaction, link: str):
 async def eliminar_crafteo(interaction: discord.Interaction, link: str):
     await interaction.response.defer(ephemeral=True)
     
-    recipe_id = get_recipe_id(link)
+    spell_id, item_id = get_recipe_ids(link)
     
-    if not recipe_id:
-        await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever.", ephemeral=True)
+    if spell_id == "SPELL_NO_ENCHANT":
+        await interaction.followup.send("❌ Has puesto un link de `spell=` no válido.", ephemeral=True)
         return
+    if not spell_id and not item_id:
+        await interaction.followup.send("❌ Link inválido.", ephemeral=True)
+        return
+
+    recipe_id = item_id if item_id else spell_id
 
     try:
         response = supabase.table('crafters').delete().eq('recipe_id', recipe_id).eq('user_id', interaction.user.id).execute()
@@ -157,10 +191,16 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
 
     await interaction.response.defer()
     
-    recipe_id = get_recipe_id(link)
-    if not recipe_id:
-        await interaction.followup.send("❌ Link inválido. Asegúrate de copiar un link de Wowhead Forever.", ephemeral=True)
+    spell_id, item_id = get_recipe_ids(link)
+    
+    if spell_id == "SPELL_NO_ENCHANT":
+        await interaction.followup.send("❌ Has puesto un link de `spell=` no válido.", ephemeral=True)
         return
+    if not spell_id and not item_id:
+        await interaction.followup.send("❌ Link inválido.", ephemeral=True)
+        return
+
+    recipe_id = item_id if item_id else spell_id
 
     try:
         # Sacamos a todos los que tienen la receta en la BD global
@@ -172,7 +212,7 @@ async def pedir_crafteo(interaction: discord.Interaction, link: str):
             cooldowns[user_id] = now + COOLDOWN_TIME
             return
 
-        # FILTRO INTER-SERVIDOR: Comprobamos quiénes de la lista están en ESTE Discord
+        # FILTRO INTER-SERVIDOR
         mentions = []
         for row in rows:
             if interaction.guild.get_member(row['user_id']):
