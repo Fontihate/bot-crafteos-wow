@@ -60,10 +60,16 @@ def get_recipe_ids(url: str) -> tuple:
                     
         elif url_type == 'item':
             item_id = url_id
-            created_match = re.search(r'Created by', html, re.IGNORECASE)
+            # Buscamos "Created by" en el HTML (puede estar en inglés o español)
+            created_match = re.search(r'Created by|Hecho por|Creado por', html, re.IGNORECASE)
             if created_match:
                 start_pos = created_match.end()
                 spell_match = re.search(r'spell=(\d+)', html[start_pos:])
+                if spell_match:
+                    spell_id = spell_match.group(1)
+            else:
+                # Fallback: A veces Wowhead mete el spell en un array de PHP/JavaScript escondido
+                spell_match = re.search(r'createdBy.*?spell=(\d+)', html, re.DOTALL | re.IGNORECASE)
                 if spell_match:
                     spell_id = spell_match.group(1)
                 
@@ -130,7 +136,7 @@ async def añadir_crafteo(interaction: discord.Interaction, link: str):
         elif spell_id and not item_id:
             msg += f"Spell ID (Enchant): `{spell_id}`"
         elif item_id and not spell_id:
-            msg += f"Item ID: `{item_id}` (No se encontró el Spell de origen)"
+            msg += f"Item ID: `{item_id}` (No se encontró el Spell de origen, pero la receta funciona igualmente)"
             
         await interaction.followup.send(msg, ephemeral=True)
     except Exception as e:
