@@ -45,25 +45,21 @@ def get_recipe_ids(url: str) -> tuple:
         
         if url_type == 'spell':
             spell_id = url_id
-            # Buscamos la frase "Create Item" en el HTML. Wowhead la usa para decir qué crea.
             create_match = re.search(r'Create Item', html, re.IGNORECASE)
             if create_match:
-                # Buscamos el PRIMER 'item=' que aparezca DESPUÉS de "Create Item"
                 start_pos = create_match.end()
                 item_match = re.search(r'item=(\d+)', html[start_pos:])
                 if item_match:
                     item_id = item_match.group(1)
             
-            # Si no encontramos item, comprobamos si es un Enchant
             if not item_id:
                 if 'enchant' in html.lower():
-                    pass # Es un encanto, no tiene item
+                    pass
                 else:
                     return "SPELL_NO_ENCHANT", None
                     
         elif url_type == 'item':
             item_id = url_id
-            # Buscamos la frase "Created by" en el HTML.
             created_match = re.search(r'Created by', html, re.IGNORECASE)
             if created_match:
                 start_pos = created_match.end()
@@ -96,16 +92,6 @@ async def on_ready():
         print(f"Comandos slash sincronizados: {len(synced)}")
     except Exception as e:
         print(f"Error al sincronizar comandos: {e}")
-
-# ==========================================
-# COMANDO DEBUG 
-# ==========================================
-@bot.tree.command(name="debug_wowhead", description="[ADMIN] Busca IDs en el HTML de Wowhead.")
-async def debug_wowhead(interaction: discord.Interaction, link: str):
-    await interaction.response.defer(ephemeral=True)
-    
-    spell_id, item_id = get_recipe_ids(link)
-    await interaction.followup.send(f"**Resultados del Scrapeo:**\nSpell ID: `{spell_id}`\nItem ID: `{item_id}`", ephemeral=True)
 
 # ==========================================
 # COMANDOS DEL BOT
