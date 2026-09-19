@@ -45,20 +45,31 @@ def get_recipe_ids(url: str) -> tuple:
         
         if url_type == 'spell':
             spell_id = url_id
-            # Buscamos TODOS los item= que haya en el HTML y nos quedamos con el primero
-            item_match = re.search(r'item=(\d+)', html)
-            if item_match:
-                item_id = item_match.group(1)
-            elif 'enchant' in html.lower():
-                pass # Es un encanto
-            else:
-                return "SPELL_NO_ENCHANT", None
-                
+            # Buscamos la frase "Create Item" en el HTML. Wowhead la usa para decir qué crea.
+            create_match = re.search(r'Create Item', html, re.IGNORECASE)
+            if create_match:
+                # Buscamos el PRIMER 'item=' que aparezca DESPUÉS de "Create Item"
+                start_pos = create_match.end()
+                item_match = re.search(r'item=(\d+)', html[start_pos:])
+                if item_match:
+                    item_id = item_match.group(1)
+            
+            # Si no encontramos item, comprobamos si es un Enchant
+            if not item_id:
+                if 'enchant' in html.lower():
+                    pass # Es un encanto, no tiene item
+                else:
+                    return "SPELL_NO_ENCHANT", None
+                    
         elif url_type == 'item':
             item_id = url_id
-            spell_match = re.search(r'spell=(\d+)', html)
-            if spell_match:
-                spell_id = spell_match.group(1)
+            # Buscamos la frase "Created by" en el HTML.
+            created_match = re.search(r'Created by', html, re.IGNORECASE)
+            if created_match:
+                start_pos = created_match.end()
+                spell_match = re.search(r'spell=(\d+)', html[start_pos:])
+                if spell_match:
+                    spell_id = spell_match.group(1)
                 
         return spell_id, item_id
         
@@ -87,48 +98,14 @@ async def on_ready():
         print(f"Error al sincronizar comandos: {e}")
 
 # ==========================================
-# COMANDO DEBUG (MEJORADO)
+# COMANDO DEBUG 
 # ==========================================
 @bot.tree.command(name="debug_wowhead", description="[ADMIN] Busca IDs en el HTML de Wowhead.")
 async def debug_wowhead(interaction: discord.Interaction, link: str):
     await interaction.response.defer(ephemeral=True)
     
-    match = re.search(r'wowhead\.com/forever(?:/\w+)?/(spell|item)=(\d+)', link)
-    if not match:
-        await interaction.followup.send("Link inválido.", ephemeral=True)
-        return
-    
-    url_type = match.group(1)
-    url_id = match.group(2)
-    clean_url = f"https://www.wowhead.com/forever/{url_type}={url_id}"
-    
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-        response = requests.get(clean_url, headers=headers, timeout=5)
-        html = response.text
-        
-        msg = f"🔍 **URL leída:** {clean_url}\n\n"
-        
-        # Buscamos 'item=' en el HTML y mostramos 100 caracteres alrededor para ver el contexto
-        match_item = re.search(r'.{100}item=\d+.{100}', html)
-        if match_item:
-            msg += f"**Contexto de 'item=':**\n```...{match_item.group(0)}...```\n\n"
-        else:
-            msg += "**No se encontró 'item=' en el HTML.**\n\n"
-            
-        # Buscamos 'spell=' igual
-        match_spell = re.search(r'.{100}spell=\d+.{100}', html)
-        if match_spell:
-            msg += f"**Contexto de 'spell=':**\n```...{match_spell.group(0)}...```\n\n"
-        else:
-            msg += "**No se encontró 'spell=' en el HTML.**\n\n"
-            
-        if len(msg) > 1900:
-            msg = msg[:1900] + "..."
-            
-        await interaction.followup.send(msg, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error al conectar: {e}", ephemeral=True)
+    spell_id, item_id = get_recipe_ids(link)
+    await interaction.followup.send(f"**Resultados del Scrapeo:**\nSpell ID: `{spell_id}`\nItem ID: `{item_id}`", ephemeral=True)
 
 # ==========================================
 # COMANDOS DEL BOT
